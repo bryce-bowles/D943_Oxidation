@@ -1,7 +1,7 @@
 ---
 title: "Oxidation"
 output: html_document
-date: '2023-04-11'
+date: '2023-03-14'
 editor_options: 
   chunk_output_type: console
 ---
@@ -29,6 +29,189 @@ if (length(missing_packages) > 0) {
 for (package in packages) {
   library(package, character.only = TRUE)
 }
+```
+
+
+-------------------- Data collection and preprocessing is not disclosed due to employee sensative information --------------------------
+
+
+
+Variable importance and Dimensionality Reduction
+
+```{r}
+start_time <- Sys.time()
+Data <- data
+Outcome <- "Oxidation Life"
+library(caret)
+
+# myFolds <- createMultiFolds(unique(Data$index), 5, 3)
+# myFoldsRow <- lapply(myFolds,function(x) as.integer(rownames(Data))[Data$index %in% x] )
+# createFolds(Data$index, k=5, returnTrain = TRUE)
+# summary(myFolds)
+
+trainControl <- trainControl(method = "repeatedcv",
+                             repeats = 1,
+                             number = 10,
+                             # index = myFoldsRow,
+                             allowParallel = TRUE)
+set.seed(1234)
+fit_rf <- caret::train(y=Data %>% pull(Outcome),
+                       x=Data %>% select(Xspace),
+                       preProcess=c("medianImpute", 'zv'),
+                       method = "ranger",
+                       num.trees = 5000,
+                       importance='permutation',
+                       tuneGrid = expand.grid(
+                         mtry = seq(25, floor(length(Xspace)-50), 3),
+                         splitrule = c('extratrees'),
+                         min.node.size=5#c(2,3,5,8)
+                         ),
+                       # tuneLength = 20,
+                       trControl = trainControl
+                       ) #The final values were mtry = 93, splitrule = extratrees and min.node.size = 3.
+end_time <- Sys.time()
+print(end_time - start_time) # ~51 sec
+# plot(fit_rf)
+fit_rf$results %>% arrange(RMSE)
+xx<-varImp(fit_rf)$importance %>%
+  as.data.frame() %>%
+  arrange(desc(Overall)) %>%
+  mutate(Importance = round(Overall, digits = 2))%>%
+  tibble::rownames_to_column() %>%
+  dplyr::rename(Component = "rowname")%>%
+  left_join(NonZeroCnt, by=c("Component")) %>%
+  select(-Overall)%>%
+  arrange(desc(Importance))
+
+
+data.table::fwrite(as.data.frame(xx),"D943-Variable importance.csv")
+# Xspace_summary <- stat.desc(df[,Xspace])
+# Xspace_summary <- as_tibble(lapply(Xspace_summary,function(x) if(is.numeric(x)) round(x, 2) else x))
+# Xspace_summary <-as_tibble(rownames_to_column(t(Xspace_summary)))
+# Xspace_summary <-column_to_rownames(.Xspace_summary, var = "component")
+
+non_BOP_or_CGTotal <- xx %>%
+  mutate(tf = xx$Component %in% setdiff(xx$Component, c(BOP, group_totals))) %>% # or formulations
+  data.frame()%>%
+  relocate(Importance, .after = Component)%>%
+  filter(tf == 'TRUE')%>%
+  select(-tf)
+
+# plot
+# par(mfrow=c(1,1))
+# plot(non_BOP_or_CGTotal$Importance)
+# abline(h=1.5,col="red")
+
+# keep about 50 components
+Xspace1<-c(non_BOP_or_CGTotal %>% filter(Importance>.4 & count>5) %>% pull(Component) %>% unique(), group_totals, BOP)
+
+# Remove Rows/Results we don't have components for
+vec <- rowSums(Data[,setdiff(Xspace1,BOP)])>0
+table(vec) # without formulation data
+Data$rowMissing <- vec
+Data <- Data %>% # remove missing formulations from set
+  filter(rowMissing != FALSE)%>%
+  select(-rowMissing)
+
+start_time <- Sys.time()
+set.seed(1234)
+fit_rf1 <- caret::train(y=Data %>% pull(Outcome),
+                        x=Data %>% select(Xspace1),
+                        preProcess=c("zv","medianImpute"),
+                        method = "ranger",
+                        # num.trees = 5000,
+                        importance='permutation',
+                        tuneGrid = expand.grid(
+                          mtry = seq(7,length(Xspace1)-1,2),#seq(7,25, 2),
+                          splitrule = c("extratrees"),
+                          min.node.size=5#c(2,3,5)
+                          ),
+                        trControl = trainControl
+                        )
+end_time <- Sys.time()
+print(end_time - start_time) # ~51 sec
+
+# plot(fit_rf1)
+
+fit_rf1$results %>% arrange(RMSE)
+xx1<-varImp(fit_rf1)$importance %>%
+  as.data.frame() %>%
+  arrange(desc(Overall)) %>%
+  tibble::rownames_to_column() %>%
+  dplyr::rename(Component = "rowname")%>%
+  left_join(NonZeroCnt, by=c("Component")) %>%
+  arrange(desc(Overall))
+
+non_BOP_or_CGTota2 <- xx1 %>%
+  mutate(tf = xx1$Component %in% setdiff(xx1$Component, c(BOP, group_totals))) %>% # or formulations
+  data.frame()%>%
+  filter(tf == 'TRUE')%>%
+  select(-tf)
+
+Xspace2<-c(
+  non_BOP_or_CGTota2 %>%
+    filter(Overall > .1) %>% #.27 is 50
+    pull(Component) %>%
+    unique(),
+  group_totals,
+  BOP
+) %>% unique()
+
+Xspace2 <- Xspace2 %>% setdiff(c("AMERICAS 150SN 88VI"))
+
+
+# Remove Rows/Results we don't have components for
+Data <- Data %>%
+    rowwise() %>% # remove empty rows
+    filter(sum(c_across(setdiff(Xspace2, c(group_totals, BOP)))) != 0 | sum(c_across(group_totals)) != 0) # remove empty rows
+
+
+# to get a true varImportance on true Xspace2
+start_time <- Sys.time()
+set.seed(1234)
+fit_rf2 <- caret::train(y=Data %>% pull(Outcome),
+                        x=Data %>% select(Xspace2),
+                        preProcess=c("zv","medianImpute"),
+                        method = "ranger",
+                        num.trees = 5000,
+                        importance='permutation',
+                        tuneGrid = expand.grid(
+                          mtry = seq(7,length(Xspace2),2),#seq(7,25, 2),
+                          splitrule = c("extratrees"),
+                          min.node.size=5#c(2,3,5)
+                          ),
+                        trControl = trainControl
+                        )
+end_time <- Sys.time()
+print(end_time - start_time) # ~51 sec
+
+NonZeroCnt<-Data[,setdiff(c(Xspace2, group_totals), BOP)] %>% apply(2,function(x) sum(x>0,na.rm=T)) %>% as.data.frame() %>%
+  tibble::rownames_to_column() %>%
+  rename(Component = "rowname", count=".") %>%
+  relocate(Component) %>%
+  arrange(desc(count))%>%
+  left_join(df_Group, by = c("Component" = "StandardComponentName1"), multiple = "all")
+
+NonZeroCnt <- varImp(fit_rf2)$importance %>%
+  as.data.frame() %>%
+  arrange(desc(Overall)) %>%
+  tibble::rownames_to_column() %>%
+  dplyr::rename(Component = "rowname")%>%
+  left_join(NonZeroCnt, by=c("Component")) %>%
+  arrange(desc(Overall)) %>% 
+  mutate(Overall = round(Overall, digits = 2))
+
+data.table::fwrite(as.data.frame(NonZeroCnt),"D943-FinalVars.csv")
+# Xspace_summary <- stat.desc(df[,Xspace2])
+# Xspace_summary <- as_tibble(lapply(Xspace_summary,function(x) if(is.numeric(x)) round(x, 2) else x))
+# Xspace_summary <-as_tibble(rownames_to_column(t(Xspace_summary)))
+```
+
+```{r}
+# data.frame(table(substr(Data$FluidCode,1,3))) %>% arrange(desc(Freq))
+# Data[c(Outcome, "FluidCode", Xspace2)] %>%
+#   # mutate(none = rowSums(Data[,setdiff(Xspace2,c(BOP, group_totals))])>0) %>%
+#   filter(substr(FluidCode,1,3) =="TOR")
 ```
 
 
