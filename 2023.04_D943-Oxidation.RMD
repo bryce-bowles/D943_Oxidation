@@ -1,0 +1,1083 @@
+---
+title: "Oxidation"
+output: html_document
+date: '2023-04-11'
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+setwd("/home/bowlesb/repos/Oxidation")
+rm(list = ls())
+
+##-------------------- Specify your test type here
+test_type_variant <- c('D943 Stability', 'TAN(D3339MOD)')
+analytical_agg_method <- 'latest'
+
+
+library(tidyverse)
+packages <- c('DBI', 'odbc', 'dbplyr', 'dplyr', 'ggplot2', 'tidyr', 'stringr', 'readr', 'readxl', 'rlang', 'tidyselect', 'writexl','BayesGOF','pastecs')
+missing_packages <- packages[-c(which(packages %in% installed.packages()))]
+
+if (length(missing_packages) > 0) {
+  install.packages(missing_packages)
+}
+for (package in packages) {
+  library(package, character.only = TRUE)
+}
+```
+
+
+-----------------------     End of Preprocessing  ---------------------------------------------
+
+
+```{r}
+data.table::fwrite(Data[,c("FluidCode", Outcome, Xspace2)],paste0(Sys.Date(),"_","OxidationLife.csv"))
+Data <-read.csv(paste0(Sys.Date(),"_","OxidationLife.csv"), check.names=FALSE )
+Xspace2 <- colnames(Data[,c(3:ncol(Data))])
+BOP <- Data[,c(which(Data%>% colnames() == "BaseOil KV100 (cSt)"):ncol(Data))] %>% colnames()
+group_totals <- Data[,c(which(Data%>% colnames() == "Antifoam"):which(Data%>% colnames() == "ZDDP"))] %>% colnames()
+table(substr(Data$FluidCode,1,3))
+```
+
+
+
+Multicollinearity:
+Variance Inflation Factor (VIF) - measure of how much the standard error of the estimate of the coefficient is inflated due to multicollinearity. VIF fof 1.0 indicates a complete absence of collinearity. VIF of 5 or 10 indicates collinearity might be problematic. 
+Model types to fix if it becomes an issue: PCA Regression, PLS, tree-based methods, penalized regression
+
+Random Forest uses bootstrap sampling and feature sampling, i.e row sampling and column sampling. Therefore Random Forest is not affected by multicollinearity that much since it is picking different set of features for different models and of course every model sees a different set of data points.
+```{r}
+
+# # Variable Correlation
+# install.packages("corrplot")
+# library(corrplot)
+# 
+# corrplot(cor(Data[,setdiff(Xspace2, BOP)]),        # Correlation matrix
+#          method = "shade", # Correlation plot method
+#          type = "full",    # Correlation plot style (also "upper" and "lower")
+#          diag = TRUE,      # If TRUE (default), adds the diagonal
+#          tl.col = "black", # Labels color
+#          bg = "white",     # Background color
+#          title = "",       # Main title
+#          col = NULL)       # Color palette
+# 
+# # Linear Model
+# frmla <-paste("`Oxidation Life` ~ ",paste('`', Xspace2,'`', collapse = " + ",sep = ""))
+# lm_model <- lm(frmla, data = Data)
+# plot(lm_model)
+
+```
+
+
+
+
+PCR Model Assessment
+
+```{r}
+# par(mfrow=c(2,3))
+# start_time <- Sys.time()
+# library(randomForest)
+# library(caret)
+# # hist(Data$`Oxidation Life`)
+#  
+# #################============Model Assessment================#####################
+# ModelAssess<-function(Data, Xspace, Outcome, preProc=c('medianImpute','zv'), Thresh, FC="FluidCode"){
+#     #Data=Data; Xspace=Xspace2; Outcome = "Oxidation Life"; preProc=c('medianImpute','zv'); Thresh=3000; seed=1; foldIndex=1; FC="FluidCode"
+#     fitControl <- trainControl(method = "repeatedcv",
+#                                #index = myFoldsRow,
+#                                number = 5, repeats=10,
+#                                verboseIter = FALSE
+#                                )
+#     set.seed(1123)
+#     fit_pcr<-train(y=Data %>% pull(Outcome),
+#                   x=Data %>% select(all_of(Xspace)),
+#                   method = 'pcr',
+#                   scale = TRUE,
+#                   tuneLength = 20,
+#                   preProcess=preProc,
+#                   trControl = fitControl)
+# 
+# 
+#     summary_seeds <- data.frame(Seed=numeric(),RMSE_train=c(),RMSE_test=c(),RMSE=c(),Accuracy=numeric(),AccuracyBase=numeric(),
+#                                 Kappa=numeric(),AccuracyLower=numeric(),AccuracyUpper=numeric(),AccuracyPValue=numeric())
+#     predictionTable <- list();i<-0
+#     print(summary_seeds)
+#     ###seeds that were randomly selected for evaluation
+#     set.seed(95175)
+#     ##randomly select 15 numbers from 1 to 1 million without replacement, the result is saved in a vector object seedNumberList
+#     seedNumberList <- sample(1:1000000,1)
+#     
+#     ### Create a loop to step through seeds
+#     RMSE_train<-c()
+#     RMSE_test<-c()
+#     for(seed in seedNumberList){
+#         i<-i+1
+#         actual_value<-c(); predicted_value<-c()
+#         actual_class <- c();  predicted_class <- c()
+#         RMSE_train_fold<-c(); RMSE_test_fold<-c();
+#         PI_value<-data.frame(LB=numeric(),UB=numeric())
+#         actualFC<- c()
+#         ## A 10-fold cross validation is used to evaluate model performance
+#         set.seed(seed)
+#         ### create folds 
+#         folds <- createFolds(Data %>% pull(Outcome), k = 5) 
+#         # folds <- createMultiFolds(unique(Data$index), 5, 1)
+#         # folds <- lapply(folds,function(x) as.integer(rownames(Data))[Data$index %in% x] )
+#         
+#         # par(mfrow=c(1,1))
+#         ### loop throuh the folds to evaluate model's performance
+#         for(foldIndex in 1:length(folds)){
+#             
+#              #drop variables with zero variance
+#             train <- Data[-folds[[foldIndex]], c(FC,Outcome,Xspace)]
+#             test <- Data[folds[[foldIndex]], c(FC,Outcome,Xspace)]
+#             
+#             preprocess_train<-preProcess(train[,-1:-2], method=preProc)
+#             train<-cbind(train[,c(1:2)],predict(preprocess_train,train[,-1:-2]))
+#             test<-cbind(test[,c(1:2)],predict(preprocess_train,test[,-1:-2]))
+#             Xspace<-intersect(Xspace,colnames(train))
+#             
+#             
+#             #========= Use caret to find bestTune of ncomp
+#             model<-train(y=train %>% pull(Outcome),
+#                          x=train %>% select(all_of(Xspace)),
+#                          method="pcr",
+#                          scale = TRUE,
+#                          tuneGrid=expand.grid(ncomp=fit_pcr$bestTune$ncomp),
+#                          trControl=trainControl(method="none"))
+#             
+#             plot(model$finalModel)
+#             model$bestTune$ncomp
+#             summary(model$finalModel)
+# 
+#             ## Using PCAs to Predict with lm
+#             pca1<-preProcess(train[Xspace2],c("center","scale","pca"))
+#             # pcom<-predict(pca1, train[Xspace2])
+#             # pcom<-pcom[,1:2] %>% as.data.frame
+#             # pcom<-cbind(FluidCode = train$FluidCode, pcom) %>% data.frame()
+#             # plot(pcom[,2:3],
+#             #       xlab = pcom[,2],
+#             #       ylab = pcom[,3])
+#             #     text(pcom[,2], pcom[,3],labels=pcom[,1])
+#             
+#             pcom<-10100*exp(predict(pca1, train[Xspace2]))/(1+exp(predict(pca1, train[Xspace2])))
+#             pcom<-pcom[,1:12] %>% as.data.frame
+#             pcatest<-10100*exp(predict(pca1, test[Xspace2]))/(1+exp(predict(pca1, test[Xspace2])))
+#             pcatest<-pcatest[,1:12] %>% as.data.frame
+#             
+#             pcData <- cbind(train %>% pull(Outcome), pcom) %>% rename(Outcome = "train %>% pull(Outcome)")
+#             model <- lm(Outcome~ ., data = pcData)
+#             pcomTest <- cbind(test %>% pull(Outcome), pcatest) %>% rename(Outcome = "test %>% pull(Outcome)")
+#             # predict(model, pcomTest, se.fit = TRUE)
+#             pred.w.plim <- 10100*exp(predict(model, pcomTest[,-1], interval = "prediction"))/(1+exp(predict(model, pcomTest[,-1], interval = "prediction")))
+#             pred.w.clim <- 10100*exp(predict(model, pcomTest[,-1], interval = "confidence"))/(1+exp(predict(model, pcomTest[,-1], interval = "confidence")))
+#             
+#            # line plot
+#            # plot(
+#            #    x = pred.w.plim[,1],
+#            #    y = 10100*exp(pcomTest$Outcome)/(1+exp(pcomTest$Outcome)),
+#            #    col = "Blue",
+#            #    xlim=c(min(pred.w.plim[,1]),max(pred.w.plim[,1])),
+#            #    ylim=c(min(pred.w.plim[,1]),max(pred.w.plim[,1])))
+#            #  abline(lm( 10100*exp(pcomTest$Outcome)/(1+exp(pcomTest$Outcome)) ~ pred.w.plim[,1]))
+#            #  lines(x=pred.w.plim[,1],y=pred.w.plim[, 2],col="red",lty=3) 
+#            #  lines(x=pred.w.plim[,1],y=pred.w.plim[, 3],col="red",lty=3)
+#            #  #sort pred.w.plim table to fix lines - error bars does not have issue
+#             
+#             # error bar plot
+#             plot(pred.w.plim[,1], 10100*exp(pcomTest$Outcome)/(1+exp(pcomTest$Outcome)), cex=0.7,
+#               xlim=c(min(pred.w.plim[,2]),max(pred.w.plim[,3])),
+#               ylim=c(min(pred.w.plim[,2]),max(pred.w.plim[,3])))
+#               arrows(x0=pred.w.plim[, 1],
+#                      y0=pred.w.plim[, 2],
+#                      x1=pred.w.plim[, 1],
+#                      y1=pred.w.plim[, 3],
+#               angle=90,length=0.02,code=2,
+#               col=rgb(0, 0, 255, max = 255, alpha = 80))
+# 
+# 
+#             predictedY<-10100*exp(predict(model,newdata = test[,Xspace]))/(1+exp(predict(model,newdata = test[,Xspace])))
+#             actualY<-10100*exp(test %>% pull(Outcome))/(1+exp(test %>% pull(Outcome)))
+#             actual_value<-c(actual_value, actualY)
+#             #predicted_value<-c(predicted_value, predict(model,test,ncomp=Ncomp))
+#             predicted_value<-c(predicted_value, predictedY)
+#             actualFC <- c(actualFC, test$FluidCode)
+#             train_actualY<-10100*exp(train %>% pull(Outcome))/(1+exp(train %>% pull(Outcome)))
+#             train_predY<-10100*exp(predict(model, train[,Xspace]))/(1+exp(predict(model, train[,Xspace])))
+#             RMSE_train_fold<-c(RMSE_train_fold, sqrt(mean((train_actualY-train_predY)^2)))
+#             RMSE_test_fold<-c(RMSE_test_fold, sqrt(mean((actualY-predictedY)^2)))
+# 
+#                   
+#             inverseData <- 10100*exp(Data %>% pull(Outcome))/(1+exp(Data %>% pull(Outcome)))
+#             MinMax <-c(min(c(min(inverseData), min(inverseData))), max(c(max(inverseData), max(inverseData))))
+#             plot(
+#               x = predictedY,
+#               y = actualY,
+#               col = "Blue",
+#               abline(lm(actualY ~ predictedY)),
+#               xlim=MinMax,
+#               ylim=MinMax)    
+#             
+#             
+#             #--------------Prediction Interval ----------------------
+#             # xxpred<-predict(model$finalMod, test[,Xspace], type = 'quantiles', quantiles = c(0.1, 0.5, 0.90))
+#             
+#             # PI <-  data.frame(
+#             #   UB = 10100 * exp(xxpred$predictions[,1]) / (1 + exp(xxpred$predictions[,1])),
+#             #   LB = 10100 * exp(xxpred$predictions[,3]) / (1 + exp(xxpred$predictions[,3]))
+#             # )
+#             
+#             # PI_plot <- data.frame(pred=predictedY,obs=actualY,LB=PI$LB,UB=PI$UB) %>% arrange(obs)
+#             #       plot(y=PI_plot$obs,
+#             #          x=1:nrow(PI_plot),type="l",col="black")
+#             #     lines(PI_plot$pred,col="red")
+#             #     lines(PI_plot$LB,col="red",lty=2)
+#             #     lines(PI_plot$UB,col="red",lty=2)
+#            
+#             # PI_value<- rbind(PI_value,PI)
+#             # test_plot <- data.frame(actualY,predictedY,test$FluidCode) %>% unique() %>% rename(FC = "test.FluidCode")
+#             # model1 <- lm(predictedY ~ actualY)
+#             # test_plot <- c(pred.w.plim %>% rename("pi.fit" = fit, "pi.lwr" = lwr, "pi.upr" = upr), pred.w.clim %>% rename("ci.fit" = fit, "ci.lwr" = lwr, "ci.upr" = upr), test_plot))
+#             # 
+#             # library(ggplot2)
+#             # library(gridExtra)
+#             #   ggplot(test_plot, aes(
+#             #          x = actualY,
+#             #          y = predictedY,
+#             #          label = FC
+#             #          # color = FluidPrefix,
+#             #          # shape = FluidPrefix,
+#             #        )) +
+#             #   geom_point()+
+#             #   ggtitle("Predicted vs Observed")+
+#             #   xlim(c(min(c(min(actualY),min(predictedY))),max(c(max(actualY),max(predictedY))))) +
+#             #   ylim(c(min(c(min(actualY),min(predictedY))),max(c(max(actualY),max(predictedY))))) +
+#             #   # geom_text(data = subset(test_plot, predictedY > pi.upr & actualY < pi.upr | predictedY < pi.lwr & actualY > pi.lwr), hjust = 0, nudge_x = 100)+
+#             # geom_abline(color = "green", size = .5, linetype = "dashed") + # reference line for perfect prediction
+#             #   stat_smooth(method = "lm", formula = y~x, size = .5, se = T, level = .95, linetype = "dashed")+
+#             #   geom_hline(yintercept=Thresh, linetype="dashed", color = "red")+
+#             #   geom_vline(xintercept=Thresh, linetype="dashed", color = "red")+
+#             #   # geom_line(data = test_plot, aes(y=pi.lwr, colour = "lwr"), linetype = "dashed")+
+#             #   # geom_line(data = test_plot, aes(y=pi.upr, colour = "upr"), linetype = "dashed")+
+#             #   scale_color_manual(name = "Legend", values = c("95% Pred Int" = "grey", "Thresh" = "red", "lm fit" = "blue", "Slope=1" = "green"))+
+#             #   labs(color = "Legend")
+#         }
+#           
+#         predictionTable[[i]] <- data.frame(FC = actualFC,pred=predicted_value,obs=actual_value)#,LB=PI_value$LB,UB=PI_value$UB)
+# 
+#         actual_class <- ifelse(actual_value>Thresh,"Pass","Fail"); actual_class<-factor(actual_class)
+#         predicted_class <- ifelse(predicted_value>Thresh,"Pass","Fail"); predicted_class<-factor(predicted_class)
+#         levels(predicted_class)<-levels(actual_class)
+#         ### save the confusion Matrix object based on data generated by a specific random seed
+#         res <- caret::confusionMatrix(predicted_class,actual_class)
+#         ### save the overall result of the confusion Matrix to res_overall, which contains measurements of interest
+#         res_overall <- res$overall
+#         ### for one random seed, save measurement of interest in a one-row data.frame object add
+#         add <- data.frame(Seed=seed,
+#                           RMSE_train = mean(RMSE_train_fold),
+#                           RMSE_test = mean(RMSE_test_fold),
+#                           RMSE=sqrt(mean((actual_value-predicted_value)^2)),
+#                           Accuracy=as.numeric(res_overall['Accuracy']),
+#                           #No information rate is the proportion of the majority group
+#                           NIR=ifelse(res_overall[['AccuracyNull']]<0.5,1-res_overall[['AccuracyNull']],res_overall[['AccuracyNull']]),
+#                           Kappa=as.numeric(res_overall['Kappa']),
+#                           AccuracyLower=as.numeric(res_overall['AccuracyLower']),
+#                           AccuracyUpper=as.numeric(res_overall['AccuracyUpper']),
+#                           AccuracyPValue=as.numeric(res_overall['AccuracyPValue']))
+#         ### for each random seed, add the result to the data.frame object summary_seeds 
+#         ### to get one table of results based on all 15 random seeds
+#         summary_seeds <- rbind(summary_seeds,add)
+#     }
+#     ### print the results of all 15 random seeds
+#     print(summary_seeds)
+#     ### print the median of Accuracy from the 15 random seeds
+#     print(median(summary_seeds$RMSE))
+#     print(median(summary_seeds$Accuracy))
+#     return(predictionTable)
+# }
+# 
+# ModelAssess <- ModelAssess(Data=Data, Outcome = "Oxidation Life", preProc=c('medianImpute', 'zv'), FC = "FluidCode", Thresh=2000, Xspace = Xspace2)
+# end_time <- Sys.time()
+# print(end_time - start_time)
+# 
+# 
+# 
+# AccuracyScenarios<-function(dt) {
+#   #dt<-ModelAssess[[1]]
+#   Results <- data.frame(Threshold=numeric(),NIR=numeric(),Accuracy=numeric())
+#   for(Threshold in seq(1000,10000,by=500)) { #Threshold = 1000
+#     temp<-data.frame(Threshold=Threshold,
+#                    NIR=max(sum(dt$obs>Threshold)/nrow(dt),1-sum(dt$obs>Threshold)/nrow(dt)),
+#                    Accuracy=sum((dt$obs>Threshold) ==( dt$pred>Threshold))/nrow(dt))
+#     Results<-rbind(Results,temp)
+#   }
+#   return(Results)
+# }
+# Accuracy_Thresh <- as.data.frame(do.call(rbind, lapply(ModelAssess,AccuracyScenarios)))
+# 
+# classificaiton <- Accuracy_Thresh %>% 
+#   group_by(Threshold)%>%
+#   summarise(mean(Accuracy))%>%
+#   left_join(Accuracy_Thresh %>% 
+#   group_by(Threshold)%>%
+#   summarise(mean(NIR)))
+
+```
+
+
+QRF Model Assessment
+
+```{r}
+par(mfrow=c(2,3))
+start_time <- Sys.time()
+library(randomForest)
+
+# hist(Data$`Oxidation Life`)
+ 
+#################============Model Assessment================#####################
+ModelAssess<-function(Data, Xspace = Xspace2, Outcome="Oxidation Life", preProc=c('medianImpute','zv'), Thresh, FC){
+    #preProc=c('medianImpute','zv'); Thresh=3000; seed=1; foldIndex=1; Xspace= Xspace2; FC="FluidCode"
+    fitControl <- trainControl(method = "repeatedcv",
+                               #index = myFoldsRow,
+                               number = 10, repeats=1,
+                               verboseIter = FALSE#,
+                               #search="random"
+                               )
+    set.seed(1123)
+    fit_rf<-train(y=Data %>% pull(Outcome),
+                  x=Data %>% select(all_of(Xspace)),
+                  method = 'ranger',
+                  num.trees = 1000,
+                  preProcess=preProc,
+                  tuneGrid = expand.grid(mtry=seq(10, length(Xspace2)-1, 2),#seq(2, floor(length(Xspace2)), 1),#,
+                                         splitrule=c('extratrees'),#'variance'),
+                                         min.node.size=5#c(2,3,5)
+                                         ),
+                  trControl = fitControl)
+    
+    #gaussian process regression 
+    # fit_gbm<-train(y=Data %>% pull(Outcome),
+    #               x=Data[,Xspace],
+    #               method = 'gbm',# 'cubist' (solid), 'gaussprRadial','gaussprPoly','gaussprLinear'
+    #               preProcess=preProc,
+    #               tuneLength=10,
+    #               trControl = fitControl)
+
+    summary_seeds <- data.frame(Seed=numeric(),RMSE_train=c(),RMSE_test=c(),RMSE=c(),Accuracy=numeric(),AccuracyBase=numeric(),
+                                Kappa=numeric(),AccuracyLower=numeric(),AccuracyUpper=numeric(),AccuracyPValue=numeric())
+    predictionTable <- list();i<-0
+    print(summary_seeds)
+    ###seeds that were randomly selected for evaluation
+    set.seed(95175) # Original seed: 1234, Validation1: 35795, Validation2: 95175
+    ##randomly select 15 numbers from 1 to 1 million without replacement, the result is saved in a vector object seedNumberList
+    seedNumberList <- sample(1:1000000,15)
+    
+    ### Create a loop to step through seeds
+    RMSE_train<-c()
+    RMSE_test<-c()
+    for(seed in seedNumberList){
+        i<-i+1
+        actual_value<-c(); predicted_value<-c()
+        actual_class <- c();  predicted_class <- c()
+        RMSE_train_fold<-c(); RMSE_test_fold<-c();
+        PI_value<-data.frame(LB=numeric(),UB=numeric())
+        actualFC<- c()
+        ## A 10-fold cross validation is used to evaluate model performance
+        set.seed(seed)
+        ### create folds 
+        folds <- createFolds(Data %>% pull(Outcome), k = 10) 
+        # folds <- createMultiFolds(unique(Data$index), 5, 1)
+        # folds <- lapply(folds,function(x) as.integer(rownames(Data))[Data$index %in% x] )
+        
+        # par(mfrow=c(1,1))
+        ### loop throuh the folds to evaluate model's performance
+        for(foldIndex in 1:length(folds)){
+            
+             #drop variables with zero variance
+            train <- Data[-folds[[foldIndex]], c(FC,Outcome,Xspace)]
+            test <- Data[folds[[foldIndex]], c(FC,Outcome,Xspace)]
+            
+            preprocess_train<-preProcess(train[,-1:-2], method=preProc)
+            train<-cbind(train[,c(1:2)],predict(preprocess_train,train[,-1:-2]))
+            test<-cbind(test[,c(1:2)],predict(preprocess_train,test[,-1:-2]))
+            Xspace<-intersect(Xspace,colnames(train))
+            
+            #=========For random forest
+            model<-train(y=train %>% pull(Outcome),
+                         x=train %>% select(all_of(Xspace)),
+                         method="ranger",
+                         num.trees = 5000,
+                         tuneGrid=expand.grid(mtry=fit_rf$bestTune$mtry,
+                                              min.node.size=fit_rf$bestTune$min.node.size,
+                                              splitrule=fit_rf$bestTune$splitrule),
+                         trControl=trainControl(method="none"),
+                         quantreg=TRUE)
+            
+            #========= For Gaussian Process
+            # model<-train(y=train %>% pull(Outcome),
+            #              x=train[,Xspace],
+            #              method="gaussprRadial",
+            #              tuneGrid=expand.grid(sigma=fit_gpr_linear$bestTune$sigma),
+            #              trControl=trainControl(method="none")
+            #              )
+            
+            #========= For qrnn
+            # model<-train(x=train[,Xspace],
+            #              y=train %>% pull(Outcome),
+            #              method="qrf",
+            #              #preProcess=c("center","scale","pca"),
+            #              trControl = trainControl(method="none",
+            #                                       allowParallel = T),
+            #              tuneLength=10
+            #              #tuneGrid = expand.grid(n.hidden=c(2),penalty=c(0),bag=c(F))
+            #              )           
+            
+           
+            #========= For Ridge
+             # lasso<-train(y=train%>% pull(Outcome),
+             #               x=train[,Xspace],
+             #               method = 'glmnet', 
+             #               tuneGrid = expand.grid(alpha = lasso_caret$bestTune$alpha, lambda = ridge_caret$bestTune$lambda)
+             #         
+                         # ) 
+            
+            #predictedY<-predict(model,newdata = test[,Xspace])
+            #actualY<-test %>% pull(Outcome)
+            # predictedY<-10100*exp(predict(ridge,newdata = test[,Xspace]))/(1+exp(predict(ridge,newdata = test[,Xspace])))
+            predictedY<-10100*exp(predict(model,newdata = test[,Xspace]))/(1+exp(predict(model,newdata = test[,Xspace])))
+            actualY<-10100*exp(test %>% pull(Outcome))/(1+exp(test %>% pull(Outcome)))
+            actual_value<-c(actual_value, actualY)
+            #predicted_value<-c(predicted_value, predict(model,test,ncomp=Ncomp))
+            predicted_value<-c(predicted_value, predictedY)
+            actualFC <- c(actualFC, test$FluidCode)
+            train_actualY<-10100*exp(train %>% pull(Outcome))/(1+exp(train %>% pull(Outcome)))
+            train_predY<-10100*exp(predict(model, train[,Xspace]))/(1+exp(predict(model, train[,Xspace])))
+            # train_predY<-10100*exp(predict(ridge, train[,Xspace]))/(1+exp(predict(ridge, train[,Xspace])))
+            RMSE_train_fold<-c(RMSE_train_fold, sqrt(mean((train_actualY-train_predY)^2)))
+            RMSE_test_fold<-c(RMSE_test_fold, sqrt(mean((actualY-predictedY)^2)))
+            
+            # pred.rf.int2 <- sapply(1:4, function(i) {
+            # tmp <- pred.rf$individual[i,] + rnorm(1001, 0, sqrt(fit2$mse))
+            #   quantile(tmp, c(0.025, 0.975))
+            # })
+            # t(pred.rf.int2)
+            xxpred<-predict(model$finalMod, test[,Xspace], type = 'quantiles', quantiles = c(0.1, 0.5, 0.9))
+            
+            PI <-  data.frame(
+              LB = 10100 * exp(xxpred$predictions[,1]) / (1 + exp(xxpred$predictions[,1])),
+              UB = 10100 * exp(xxpred$predictions[,3]) / (1 + exp(xxpred$predictions[,3]))
+            )
+            # print(PI)
+            # error bar Pred vs Actual Plot
+         #    MinMax <-c(0, max(PI$UB))   
+         # plot(predictedY, actualY, cex=0.7, xlim = MinMax, ylim = MinMax)
+         #      arrows(x0=predictedY,
+         #             y0=PI$LB,
+         #             x1=predictedY,
+         #             y1=PI$UB,
+         #      angle=90,length=0.02,code=3,
+         #      col=rgb(0, 0, 255, max = 255, alpha = 80))          
+            
+            # plot(
+            #   x = predictedY,
+            #   y = actualY,
+            #   col = "Blue",
+            #   abline(lm(actualY ~ predictedY)),
+            #   xlim=MinMax,
+            #   ylim=MinMax)
+              
+                        
+            # PI_plot <- data.frame(pred=predictedY,obs=actualY,LB=PI$LB,UB=PI$UB) %>% arrange(obs)
+            #       plot(y=PI_plot$obs,
+            #          x=1:nrow(PI_plot),type="l",col="black")
+            #     lines(PI_plot$pred,col="red")
+            #     lines(PI_plot$LB,col="red",lty=2)
+            #     lines(PI_plot$UB,col="red",lty=2)
+              
+            # test_plot <- data.frame(actualY,predictedY,test$FluidCode) %>% unique() %>% rename(FC = "test.FluidCode")
+            # model1 <- lm(predictedY ~ actualY)
+            # test_plot <- data.frame(c(data.frame(predict(model, newdata = test, interval = "prediction", level = 0.95))%>% rename("pi.fit" = fit, "pi.lwr" = lwr, "pi.upr" = upr),data.frame(predict(model, newdata = test, interval = "confidence", level = 0.95))%>% rename("ci.fit" = fit, "ci.lwr" = lwr, "ci.upr" = upr),test_plot))
+
+            # library(ggplot2)
+            # library(gridExtra)
+            #   ggplot(test_plot, aes(
+            #          x = actualY,
+            #          y = predictedY,
+            #          label = FC
+            #          # color = FluidPrefix,
+            #          # shape = FluidPrefix,
+            #        )) +
+            #   geom_point()+
+            #   ggtitle("Predicted vs Observed")+
+            #   xlim(c(min(c(min(actualY),min(predictedY))),max(c(max(actualY),max(predictedY))))) +
+            #   ylim(c(min(c(min(actualY),min(predictedY))),max(c(max(actualY),max(predictedY))))) +
+            #   # geom_text(data = subset(test_plot, predictedY > pi.upr & actualY < pi.upr | predictedY < pi.lwr & actualY > pi.lwr), hjust = 0, nudge_x = 100)+
+            # geom_abline(color = "green", size = .5, linetype = "dashed") + # reference line for perfect prediction
+            #   stat_smooth(method = "lm", formula = y~x, size = .5, se = T, level = .95, linetype = "dashed")+
+            #   geom_hline(yintercept=Thresh, linetype="dashed", color = "red")+
+            #   geom_vline(xintercept=Thresh, linetype="dashed", color = "red")+
+            #   # geom_line(data = test_plot, aes(y=pi.lwr, colour = "lwr"), linetype = "dashed")+
+            #   # geom_line(data = test_plot, aes(y=pi.upr, colour = "upr"), linetype = "dashed")+
+            #   scale_color_manual(name = "Legend", values = c("95% Pred Int" = "grey", "Thresh" = "red", "lm fit" = "blue", "Slope=1" = "green"))+
+            #   labs(color = "Legend")
+              
+            PI_value<- rbind(PI_value,PI)
+        }
+          
+        predictionTable[[i]] <- data.frame(FC = actualFC,pred=predicted_value,obs=actual_value,LB=PI_value$LB,UB=PI_value$UB)
+
+        actual_class <- ifelse(actual_value>Thresh,"Pass","Fail"); actual_class<-factor(actual_class)
+        predicted_class <- ifelse(predicted_value>Thresh,"Pass","Fail"); predicted_class<-factor(predicted_class)
+        levels(predicted_class)<-levels(actual_class)
+        ### save the confusion Matrix object based on data generated by a specific random seed
+        res <- caret::confusionMatrix(predicted_class,actual_class)
+        ### save the overall result of the confusion Matrix to res_overall, which contains measurements of interest
+        res_overall <- res$overall
+        ### for one random seed, save measurement of interest in a one-row data.frame object add
+        add <- data.frame(Seed=seed,
+                          RMSE_train = mean(RMSE_train_fold),
+                          RMSE_test = mean(RMSE_test_fold),
+                          RMSE=sqrt(mean((actual_value-predicted_value)^2)),
+                          Accuracy=as.numeric(res_overall['Accuracy']),
+                          #No information rate is the proportion of the majority group
+                          NIR=ifelse(res_overall[['AccuracyNull']]<0.5,1-res_overall[['AccuracyNull']],res_overall[['AccuracyNull']]),
+                          Kappa=as.numeric(res_overall['Kappa']),
+                          AccuracyLower=as.numeric(res_overall['AccuracyLower']),
+                          AccuracyUpper=as.numeric(res_overall['AccuracyUpper']),
+                          AccuracyPValue=as.numeric(res_overall['AccuracyPValue']))
+        ### for each random seed, add the result to the data.frame object summary_seeds 
+        ### to get one table of results based on all 15 random seeds
+        summary_seeds <- rbind(summary_seeds,add)
+    }
+    ### print the results of all 15 random seeds
+    print(summary_seeds)
+    ### print the median of Accuracy from the 15 random seeds
+    print(median(summary_seeds$RMSE))
+    print(median(summary_seeds$Accuracy))
+    return(predictionTable)
+}
+
+ModelAssess <- ModelAssess(Data=Data, Outcome = "Oxidation Life", preProc=c('medianImpute', 'zv'), FC = "FluidCode", Thresh=2000, Xspace = Xspace2)
+
+par(mfrow=c(1,1))
+RMSE(ModelAssess[[1]]$pred,ModelAssess[[1]]$obs)
+mean(ModelAssess[[1]]$UB-ModelAssess[[1]]$LB)
+median(ModelAssess[[1]]$UB-ModelAssess[[1]]$LB)
+PredAct_Fit <- lm(ModelAssess[[1]]$pred ~ ModelAssess[[1]]$obs)
+
+ModelAssess[[1]] <- ModelAssess[[1]] %>% arrange(obs,pred)
+plot(x=1:nrow(ModelAssess[[1]]),
+     y=ModelAssess[[1]]$obs,
+     type="l",lwd=2,
+     col="black",
+     xlim = range(1:nrow(ModelAssess[[1]])), ylim = c(0,max(ModelAssess[[1]]$UB)),
+     xlab="Sample No.",ylab="Oxidation Life time")
+#legend("topleft",legend=c("Actual","Prediction"))
+arrows(x0=1:nrow(ModelAssess[[1]]),
+       y0=ModelAssess[[1]]$LB,
+       x1=1:nrow(ModelAssess[[1]]),
+       y1=ModelAssess[[1]]$UB,
+angle=90,length=0.02,code=3,
+col=rgb(0, 0, 255, max = 255, alpha = 80))
+points(x=1:nrow(ModelAssess[[1]]),
+       y=ModelAssess[[1]]$pred,col="blue",pch=16,cex=0.5)
+OutsideInterval <- ModelAssess[[1]] %>% mutate(Bias=ifelse(obs<LB|obs>UB,1,0)) %>% pull(Bias) %>% sum()
+OutsideInterval / nrow(Data)
+
+# plot(ModelAssess[[1]]$pred,ModelAssess[[1]]$obs,xlim = c(0,max(ModelAssess[[1]]$UB)), ylim = c(0,max(ModelAssess[[1]]$UB)))
+# arrows(x0=ModelAssess[[1]]$pred,
+#        y0=ModelAssess[[1]]$LB,
+#        x1=ModelAssess[[1]]$pred,
+#        y1=ModelAssess[[1]]$UB,
+# angle=90,length=0.02,code=3,
+# col=rgb(0, 0, 255, max = 255, alpha = 80))
+# abline( lm(ModelAssess[[1]]$pred ~ ModelAssess[[1]]$obs))
+
+AccuracyScenarios<-function(dt) {
+  #dt<-ModelAssess[[1]]
+  Results <- data.frame(Threshold=numeric(),NIR=numeric(),Accuracy=numeric())
+  for(Threshold in seq(500,10000,by=500)) { #Threshold = 1000
+    temp<-data.frame(Threshold=Threshold,
+                   NIR=max(sum(dt$obs>Threshold)/nrow(dt),1-sum(dt$obs>Threshold)/nrow(dt)),
+                   Accuracy=sum((dt$obs>Threshold) ==( dt$pred>Threshold))/nrow(dt))
+    Results<-rbind(Results,temp)
+  }
+  return(Results)
+}
+Accuracy_Thresh <- as.data.frame(do.call(rbind, lapply(ModelAssess,AccuracyScenarios)))
+
+classificaiton <- Accuracy_Thresh %>% 
+  group_by(Threshold)%>%
+  summarise(mean(Accuracy))%>%
+  left_join(Accuracy_Thresh %>% 
+  group_by(Threshold)%>%
+  summarise(mean(NIR)))
+classificaiton
+
+end_time <- Sys.time()
+print(end_time - start_time)
+```
+
+
+GPM
+```{r}
+# start_time <- Sys.time()
+# 
+# library(GPM)
+# ModelAssess1<-function(Data, Xspace, Outcome, preProc=c('medianImpute','zv'), Thresh, FC){
+#     # Data=Data; Outcome = "Oxidation Life"; preProc=c('medianImpute'); FC = "FluidCode"; Thresh=2000; Xspace = Xspace2; seed=1; foldIndex=3;preProc=c('medianImpute','zv')
+#     summary_seeds <- data.frame(Seed=numeric(),RMSE_train=c(),RMSE_test=c(),RMSE=c(),Accuracy=numeric(),AccuracyBase=numeric(),
+#                                 Kappa=numeric(),AccuracyLower=numeric(),AccuracyUpper=numeric(),AccuracyPValue=numeric())
+#     predictionTable <- list();i<-0
+#     print(summary_seeds)
+#     ###seeds that were randomly selected for evaluation
+#     set.seed(95175) # Original seed: 1234, Validation1: 35795, Validation2: 95175
+#     ##randomly select 15 numbers from 1 to 1 million without replacement, the result is saved in a vector object seedNumberList
+#     seedNumberList <- sample(1:1000000,1)
+# 
+#     ### Create a loop to step through seeds
+#     RMSE_train<-c()
+#     RMSE_test<-c()
+#     for(seed in seedNumberList){
+#         i<-i+1
+#         actual_value<-c(); predicted_value<-c();PI_value<-data.frame(LB=numeric(),UB=numeric())
+#         actual_class <- c();  predicted_class <- c()
+#         RMSE_train_fold<-c(); RMSE_test_fold<-c()
+#         ## A 10-fold cross validation is used to evaluate model performance
+#         set.seed(seed)
+#         ### create folds
+#         folds <- createFolds(Data %>% pull(Outcome), k = 5)
+#         # folds <- createMultiFolds(unique(Data$index), 5, 1)
+#         # folds <- lapply(folds,function(x) as.integer(rownames(Data))[Data$index %in% x] )
+# 
+#         # par(mfrow=c(1,1))
+#         ### loop throuh the folds to evaluate model's performance
+#         for(foldIndex in 1:length(folds)){
+# 
+#             #drop variables with zero variance for each fold
+#             train <- Data[-folds[[foldIndex]], c(FC,Outcome,Xspace)]
+#             test <- Data[folds[[foldIndex]], c(FC,Outcome,Xspace)]
+# 
+#             preprocess_train<-preProcess(train[,-1:-2], method=preProc)
+#             train<-cbind(train[,c(1:2)],predict(preprocess_train,train[,-1:-2]))
+#             test<-cbind(test[,c(1:2)],predict(preprocess_train,test[,-1:-2]))
+#             Xspace<-intersect(Xspace,colnames(train))
+# 
+#             model <- Fit(X= train[,Xspace] %>% as.matrix(),
+#                          Y=train %>% pull(Outcome) %>% as.matrix(),
+#                          # Eps = 10^seq(-1,-8),
+#                          MaxIter = 1)
+#             print(foldIndex)
+# 
+#             #predictedY<-predict(model,newdata = test[,Xspace])
+#             #actualY<-test %>% pull(Outcome)
+#             predictedY<-10100*exp(Predict(XF = test[,Xspace] %>% as.matrix, model)$YF)/(1+exp(Predict(XF = test[,Xspace]%>%as.matrix, model)$YF))
+#             actualY<-10100*exp(test %>% pull(Outcome))/(1+exp(test %>% pull(Outcome)))
+#             actual_value<-c(actual_value, actualY)
+#             #predicted_value<-c(predicted_value, predict(model,test,ncomp=Ncomp))
+#             predicted_value<-c(predicted_value, predictedY)
+# 
+#             train_actualY<-10100*exp(train %>% pull(Outcome))/(1+exp(train %>% pull(Outcome)))
+#             train_predY<-10100*exp(Predict(train[,Xspace]%>% as.matrix, model)$YF)/(1+exp(Predict(train[,Xspace]%>% as.matrix,model)$YF))
+#             RMSE_train_fold<-c(RMSE_train_fold, sqrt(mean((train_actualY-train_predY)^2)))
+#             RMSE_test_fold<-c(RMSE_test_fold, sqrt(mean((actualY-predictedY)^2)))
+# 
+#             # model1 <- lm(predictedY ~ actualY)
+# 
+#             # Prediction Intervals
+#             Predict_gpr <- Predict(XF = test[,Xspace] %>% as.matrix, model, MSE_on=1)
+#           PI <-  data.frame(
+#               LB = 10100 * exp(Predict_gpr$YF - sqrt(Predict_gpr$MSE)) / (1 + exp(Predict_gpr$YF - sqrt(Predict_gpr$MSE))),
+#               UB = 10100 * exp(Predict_gpr$YF + sqrt(Predict_gpr$MSE)) / (1 + exp(Predict_gpr$YF + sqrt(Predict_gpr$MSE)))
+#             )
+# 
+#           PI_value<- rbind(PI_value,PI)
+#           MinMax <-c(0, max(PI$UB))
+# 
+#          #  # error bar plot
+#          # plot(predictedY,actualY,cex=0.7, xlim = MinMax, ylim = MinMax)
+#          #      arrows(x0=predictedY,
+#          #             y0=PI$LB,
+#          #             x1=predictedY,
+#          #             y1=PI$UB,
+#          #      angle=90,length=0.02,code=3,
+#          #      col=rgb(0, 0, 255, max = 255, alpha = 80))
+# 
+#           # Pred Vs Obs plot
+# 
+#             # PI Plot
+#           # PI_plot <- data.frame(pred=predictedY,obs=actualY,LB=PI$LB,UB=PI$UB) %>% arrange(obs)
+#           #         plot(y=PI_plot$obs,
+#           #            x=1:nrow(PI_plot),type="l",col="black")
+#           #       lines(PI_plot$pred,col="red")
+#           #       lines(PI_plot$LB,col="red",lty=2)
+#           #       lines(PI_plot$UB,col="red",lty=2)
+# 
+#         }
+# 
+#         predictionTable[[i]] <- data.frame(pred=predicted_value,obs=actual_value, UB = PI_value$UB, LB = PI_value$LB)
+#         actual_class <- ifelse(actual_value>Thresh,"Pass","Fail"); actual_class<-factor(actual_class)
+#         predicted_class <- ifelse(predicted_value>Thresh,"Pass","Fail"); predicted_class<-factor(predicted_class)
+#         levels(predicted_class)<-levels(actual_class)
+#         ### save the confusion Matrix object based on data generated by a specific random seed
+#         res <- caret::confusionMatrix(predicted_class,actual_class)
+#         ### save the overall result of the confusion Matrix to res_overall, which contains measurements of interest
+#         res_overall <- res$overall
+#         ### for one random seed, save measurement of interest in a one-row data.frame object add
+#         add <- data.frame(Seed=seed,
+#                           RMSE_train = mean(RMSE_train_fold),
+#                           RMSE_test = mean(RMSE_test_fold),
+#                           RMSE=sqrt(mean((actual_value-predicted_value)^2)),
+#                           Accuracy=as.numeric(res_overall['Accuracy']),
+#                           #No information rate is the proportion of the majority group
+#                           NIR=ifelse(res_overall[['AccuracyNull']]<0.5,1-res_overall[['AccuracyNull']],res_overall[['AccuracyNull']]),
+#                           Kappa=as.numeric(res_overall['Kappa']),
+#                           AccuracyLower=as.numeric(res_overall['AccuracyLower']),
+#                           AccuracyUpper=as.numeric(res_overall['AccuracyUpper']),
+#                           AccuracyPValue=as.numeric(res_overall['AccuracyPValue']))
+#         ### for each random seed, add the result to the data.frame object summary_seeds
+#         ### to get one table of results based on all 15 random seeds
+#         summary_seeds <- rbind(summary_seeds,add)
+#     }
+#     ### print the results of all 15 random seeds
+#     print(summary_seeds)
+#     ### print the median of Accuracy from the 15 random seeds
+#     print(median(summary_seeds$RMSE))
+#     print(median(summary_seeds$Accuracy))
+#     return(predictionTable)
+# }
+# 
+# 
+# ModelAssess_GPM <- ModelAssess1(Data=Data, Outcome = "Oxidation Life", preProc=c('medianImpute','zv'), FC = "FluidCode", Thresh=2000, Xspace = Xspace2)
+# # write.xlsx(data.frame(ModelAssess), "GBM_Results.xlsx", sheetName = "Sheet1")
+# par(mfrow=c(1,1))
+# RMSE(ModelAssess_GPM[[1]]$pred,ModelAssess_GPM[[1]]$obs)
+# mean(ModelAssess_GPM[[1]]$UB-ModelAssess_GPM[[1]]$LB)
+# median(ModelAssess_GPM[[1]]$UB-ModelAssess_GPM[[1]]$LB)
+# 
+# 
+# ModelAssess_GPM[[1]] <- ModelAssess_GPM[[1]] %>% arrange(obs,pred)
+# plot(x=1:nrow(ModelAssess_GPM[[1]]),
+#      y=ModelAssess_GPM[[1]]$obs,
+#      type="l",lwd=2,
+#      col="black",
+#      xlim = range(1:nrow(ModelAssess_GPM[[1]])), ylim = c(0,max(ModelAssess_GPM[[1]]$UB)),
+#      xlab="Sample No.",ylab="Oxidation Life time")
+# #legend("topleft",legend=c("Actual","Prediction"))
+# arrows(x0=1:nrow(ModelAssess_GPM[[1]]),
+#        y0=ModelAssess_GPM[[1]]$LB,
+#        x1=1:nrow(ModelAssess_GPM[[1]]),
+#        y1=ModelAssess_GPM[[1]]$UB,
+# angle=90,length=0.02,code=3,
+# col=rgb(0, 0, 255, max = 255, alpha = 80))
+# points(x=1:nrow(ModelAssess_GPM[[1]]),
+#        y=ModelAssess_GPM[[1]]$pred,col="blue",pch=16,cex=0.5)
+# OutsideInterval <- ModelAssess_GPM[[1]] %>% mutate(Bias=ifelse(obs<LB|obs>UB,1,0)) %>% pull(Bias) %>% sum()
+# OutsideInterval / nrow(Data)
+# #
+# # plot(ModelAssess_GPM[[1]]$pred,ModelAssess_GPM[[1]]$obs,xlim = c(0,max(ModelAssess_GPM[[1]]$UB)), ylim = c(0,max(ModelAssess_GPM[[1]]$UB)))
+# # arrows(x0=ModelAssess_GPM[[1]]$pred,
+# #        y0=ModelAssess_GPM[[1]]$LB,
+# #        x1=ModelAssess_GPM[[1]]$pred,
+# #        y1=ModelAssess_GPM[[1]]$UB,
+# # angle=90,length=0.02,code=3,
+# # col=rgb(0, 0, 255, max = 255, alpha = 80))
+# # abline( lm(ModelAssess_GPM[[1]]$pred ~ ModelAssess_GPM[[1]]$obs))
+# 
+# 
+# 
+# AccuracyScenarios_GPM<-function(dt) {
+#   #dt<-ModelAssess[[1]]
+#   Results <- data.frame(Threshold=numeric(),NIR=numeric(),Accuracy=numeric())
+#   for(Threshold in seq(1000,10000,by=500)) { #Threshold = 1000
+#     temp<-data.frame(Threshold=Threshold,
+#                    NIR=max(sum(dt$obs>Threshold)/nrow(dt),1-sum(dt$obs>Threshold)/nrow(dt)),
+#                    Accuracy=sum((dt$obs>Threshold) ==( dt$pred>Threshold))/nrow(dt))
+#     Results<-rbind(Results,temp)
+#   }
+#   return(Results)
+# }
+# Accuracy_Thresh_GP <- as.data.frame(do.call(rbind, lapply(ModelAssess_GPM,AccuracyScenarios_GPM)))
+# 
+# # mean accuracy of all seeds
+# classificaiton_GPM <- Accuracy_Thresh_GP %>%
+#   group_by(Threshold)%>%
+#   summarise(mean(Accuracy))%>%
+#   left_join(Accuracy_Thresh_GP %>%
+#   group_by(Threshold)%>%
+#   summarise(mean(NIR)))
+# 
+# # Accuracy_Thresh %>%
+# #   group_by(Thresh, median(RMSE))
+# end_time <- Sys.time()
+# print(end_time - start_time)
+```
+
+
+
+# Final model for Application (using all data)
+
+QRF
+```{r}
+start_time <- Sys.time()
+library(randomForest)
+
+preProcess=("medianImpute");Outcome = "Oxidation Life"
+
+    fitControl <- trainControl(method = "repeatedcv",
+                               #index = myFoldsRow,
+                               number = 10, repeats=3,
+                               verboseIter = FALSE#,
+                               #search="random"
+                               )
+    set.seed(1123)
+    fit_rf<-train(y=Data %>% pull(Outcome),
+                  x=Data %>% select(all_of(Xspace2)),
+                  method = 'ranger',
+                  num.trees = 1000,
+                  preProcess=("medianImpute"),
+                  tuneGrid = expand.grid(mtry=seq(2, floor(length(Xspace2)), 1),#,
+                                         splitrule=c('extratrees'),#'variance'),
+                                         min.node.size=5#c(2,3,5,10)
+                                         ),
+                  trControl = fitControl)
+
+            plot(fit_rf)
+            #=========For random forest
+            model<-train(y=Data %>% pull(Outcome),
+                         x=Data %>% select(Xspace2),
+                         method="ranger",
+                         preProcess=("medianImpute"),
+                         num.trees = 10000,
+                         tuneGrid=expand.grid(mtry=fit_rf$bestTune$mtry,
+                                              min.node.size=fit_rf$bestTune$min.node.size,
+                                              splitrule=fit_rf$bestTune$splitrule),
+                         trControl=trainControl(method="none"),
+                         # importance = TRUE,
+                         quantreg=TRUE)
+
+saveRDS(model,file=paste0('2023.04_D943-Oxidation',".rds"))
+# data.table::fwrite(NonZeroCnt,paste0("inputs.csv"))
+
+end_time <- Sys.time()
+print(end_time - start_time)
+```
+
+GPM
+```{r}
+# ############==========Final model for Application (using all data)==============#################
+# 
+# start_time <- Sys.time()
+# library(GPM)
+# 
+#     # Data=Data; Outcome = "Oxidation Life"; FC = "FluidCode"; Thresh=2000; Xspace = Xspace2; seed=1; foldIndex=3; preProc=c('medianImpute','zv')
+# 
+#             preprocess_Data <-preProcess(Data[,-1:-2], method=preProc)
+#             Data<-cbind(Data[,c(1:2)],predict(preprocess_Data,Data[,-1:-2]))
+#             Xspace<-intersect(Xspace,colnames(Data))
+# 
+#             set.seed(95175)
+#             # tau_seq <- 10^seq(-3, 3, length.out = 20)
+#             model <- Fit(X= Data[,Xspace] %>% as.matrix(),
+#                          Y=Data %>% pull(Outcome) %>% as.matrix(),
+#                          # tau = tau_seq,
+#                          # Eps = 10^seq(-1,-8),
+#                          MaxIter = 1
+#                          )
+# 
+# saveRDS(model,file=paste0('Oxidation',".rds"))
+# 
+# Model <- readRDS("Oxidation.rds")
+# 
+# end_time <- Sys.time()
+# print(end_time - start_time)
+```
+
+
+Read Files
+```{r}
+# Model
+Model <- readRDS("2023.04_D943-Oxidation.rds")
+
+# Data
+Data <-read.csv("2023-04-11_OxidationLife.csv", check.names=FALSE )
+Xspace2 <- colnames(Data[,c(3:ncol(Data))])
+BOP <- Data[,c(which(Data%>% colnames() == "BaseOil KV100 (cSt)"):ncol(Data))] %>% colnames()
+group_totals <- Data[,c(which(Data%>% colnames() == "Antifoam"):which(Data%>% colnames() == "ZDDP"))] %>% colnames()
+table(substr(Data$FluidCode,1,3))
+
+# Component Groups
+df_Group <- read_excel("Oxidation_ComponentGroups.xlsx") %>%
+  select(`StandardComponentName1`, `Group`)%>%
+  unique()%>%
+  mutate(Group = ifelse(is.na(Group),"Other", Group),
+         Group = ifelse(Group == "Additive","Other", Group))
+```
+
+
+```{r}
+testSample <- Data[40, ] %>% select(-c("FluidCode", "Oxidation Life"))
+
+# get median for BOP & change BOP to the median of overall dataset
+preprocess_BOP <-  preProcess(Data, method = "medianImpute")
+dataSample <-  predict(preprocess_BOP, Data)
+dataSample <- dataSample %>% 
+  mutate(OL_t = 10100 * exp(dataSample$`Oxidation Life`) / (1 + exp(dataSample$`Oxidation Life`))
+) %>% relocate(OL_t, .after = `Oxidation Life`)
+
+testSample <-  predict(preprocess_BOP, testSample)
+
+# testSample$`BaseOil KV100 (cSt)`<- median(dataSample$`BaseOil KV100 (cSt)`)
+# testSample$`BaseOil KV40 (cSt)` <- median(dataSample$`BaseOil KV40 (cSt)`)
+# testSample$`BaseOil VI` <- median(dataSample$`BaseOil VI`)
+# testSample$`BaseOil Saturates (%)` <- median(dataSample$`BaseOil Saturates (%)`)
+# testSample$`BaseOil Sulfur (ppm)`<- median(dataSample$`BaseOil Sulfur (ppm)`)
+# testSample$`Base Oil Specific Gravity (15C)` <- median(dataSample$`Base Oil Specific Gravity (15C)`)
+
+# change all others to zero
+testSample[,setdiff(Xspace2,BOP)]
+testSample[,setdiff(Xspace2,BOP)] <- 0
+
+# Oxidation Life median = 4050.5 (for reference)
+median(10100 * exp(median(dataSample$`Oxidation Life`)) / (1 + exp(dataSample$`Oxidation Life`))) 
+boxplot(dataSample$`HITEC 521F`)
+dataSample %>% filter(`HITEC 521F`>0)
+testSample<-testSample %>% slice(rep(1, each=10))
+testSample$`HITEC 2592` <- 0
+testSample$`BaseOil Saturates (%)` <- seq(40,100,length.out=10)
+Prediction <- predict(Model$finalMod, testSample[,Xspace2], type = 'quantiles', quantiles = c(0.1, 0.5, 0.9))
+            
+data.frame(
+  LB = 10100 * exp(Prediction$predictions[, 1]) / (1 + exp(Prediction$predictions[, 1])),
+  Prediction = 10100 * exp(Prediction$predictions[, 2]) / (1 + exp(Prediction$predictions[, 2])),
+  UB = 10100 * exp(Prediction$predictions[, 3]) / (1 + exp(Prediction$predictions[, 3]))
+)
+
+```
+
+
+Model Diagnostics
+```{r}
+######=========== Importance Rank ================
+# ImportanceRank<-function(Model,Data,Xspaces){
+#     ImpRank<-as.data.frame(varImp(Model)$importance)
+#     ImpRank$Features<-rownames(ImpRank)
+#     NonZeroCnt_1st<-data.frame(.=nrow(Data))
+#     rownames(NonZeroCnt_1st)<-"Oxidation Life"
+#     NonZeroCnt<-Data[,c(Xspaces[-1])] %>% apply(2,function(x) sum(x>0, na.rm=T)) %>% as.data.frame()
+#     NonZeroCnt<-rbind(NonZeroCnt_1st,NonZeroCnt)
+#     ImpRank <- ImpRank %>% relocate(Features) %>% cbind(NonZeroCnt) %>% arrange(desc(Overall)) %>% rename(NonZeroCnt=".") %>% mutate(Overall=round(Overall,1))
+#     rownames(ImpRank)<-NULL
+#     return(ImpRank)
+# }
+# FZG_Imp<-ImportanceRank(Model= Model,Data=Data,Xspaces=Xspace2)
+# # Barplot
+# library(ggplot2)
+# ggplot(FZG_Imp, aes(x = reorder(Features, Overall), y = Overall)) +
+#   geom_bar(stat = "identity") +
+#   coord_flip() +
+#   xlab("Component") +
+#   ylab("Scaled Variable Importance")
+
+######=========== Correlation Coefficient ================
+# ComponentGroups_Table <- read_excel("ComponentGrouping_20220829_YK2.xlsx",sheet = 2)
+ComponentGroups_Table <- df_Group %>% select(StandardComponentName1, Group) %>% unique() %>% filter(is.na(Group)==F)
+ComponentGroups_Table <- ComponentGroups_Table %>% rename(`Material Name` = StandardComponentName1) %>% unique()
+ComponentGroups <- group_totals
+  
+SimuCorr<-function(Model,df, Outcome, VariablesSelected) {
+    #Model<- Model; df<-df[,c(1,3:31)]; Outcome="Oxidation Life"; VariablesSelected<-Data[3:ncol(Data)] %>% colnames()
+    SimuData_summary<-data.frame(Feature=c(),Cor=c(),PValue=c(),LB=c(),UB=c())
+    VariablesSelected1<-intersect(VariablesSelected,ComponentGroups_Table$`Material Name`)
+    for(i in VariablesSelected1){
+        #i="HITEC 2592"
+        Group_<-ComponentGroups_Table$Group[ComponentGroups_Table$`Material Name`==i]
+        SimuData<-df %>% select(c(Outcome,VariablesSelected))   ##Change for different models
+        SimuData <- SimuData %>% slice(rep(1:n(), each=10))
+        Other<-ifelse(Group_ %in% SimuData == TRUE, SimuData %>% pull(Group_), 0) - SimuData %>% pull(i) # had to update this to ifelse
+        SimuData[,i]<-rep(seq(range(df %>% pull(i))[1],range(df %>% pull(i))[2],length.out=10), nrow(df))  #quantile(df %>% pull(i), seq(0,1,length.out=10))
+        SimuData[,Group_]<-SimuData %>% pull(i) + Other
+        SimuData<-SimuData %>% mutate(Predicted = predict(Model,SimuData)) %>%
+            relocate(Predicted,.after=Outcome) %>%
+            rename(Ind=i)
+        temp<-data.frame(Feature=i,
+                         Cor=cor.test(SimuData$Predicted, SimuData$Ind)$estimate,
+                         PValue=cor.test(SimuData$Predicted, SimuData$Ind)$p.value,
+                         LB=cor.test(SimuData$Predicted, SimuData$Ind)$conf.int[1],
+                         UB=cor.test(SimuData$Predicted, SimuData$Ind)$conf.int[2])
+        SimuData_summary<-rbind(SimuData_summary,temp) %>% arrange(desc(Cor))
+      }
+    
+    for(i in ComponentGroups){
+        #i="Detergent"
+        SingleComponents<-ComponentGroups_Table$`Material Name`[ComponentGroups_Table$Group==i]
+        SimuData<-df %>% select(c(Outcome,VariablesSelected)) ##Change for different models
+        SimuData <- SimuData %>% slice(rep(1:n(), each=10))
+        GroupMins<-df %>% select(intersect(SingleComponents,VariablesSelected)) %>% rowSums()
+        GroupMax<-max(SimuData %>% pull(i)) + IQR(SimuData %>% pull(i))
+        SimuData[,i]<-sapply(1:length(GroupMins), function(i) seq(GroupMins[i], GroupMax, length.out=10)) %>% c()
+        SimuData<-SimuData %>% mutate(Predicted = predict(Model,SimuData)) %>%
+        relocate(Predicted,.after=Outcome) %>%
+        dplyr::rename(Ind=i)
+        temp<-data.frame(Feature=i,
+                          Cor=cor.test(SimuData$Predicted, SimuData$Ind)$estimate,
+                          PValue=cor.test(SimuData$Predicted, SimuData$Ind)$p.value,
+                          LB=cor.test(SimuData$Predicted, SimuData$Ind)$conf.int[1],
+                          UB=cor.test(SimuData$Predicted, SimuData$Ind)$conf.int[2])
+        SimuData_summary<-rbind(SimuData_summary,temp) %>% arrange(desc(Cor))
+    }
+    # SimuData_summary <- SimuData_summary[order(match(SimuData_summary[,1],FZG_Imp[,1])),]
+    return(SimuData_summary)
+    ggplot(SimuData_summary, aes(y = c(1:length(Feature)), x = Cor)) +
+        geom_point(shape = 18, size = 5) +  
+        geom_errorbarh(aes(xmin = LB, xmax = UB), height = 0.25) +
+        geom_vline(xintercept = 0, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+        geom_hline(yintercept = 0, color = "red", linetype = "dashed", cex = 1, alpha = 0.5)+
+        scale_y_continuous(name = "", breaks=1:length(SimuData_summary$Feature), labels = SimuData_summary$Feature, trans = "reverse") +
+        xlab("Correlation Coefficient (95% CI)") + 
+        ylab(" ") + 
+        theme_bw() +
+        theme(panel.border = element_blank(),
+              panel.background = element_blank(),
+              panel.grid.major = element_blank(), 
+              panel.grid.minor = element_blank(), 
+              axis.line = element_line(colour = "black"),
+              axis.text.y = element_text(size = 12, colour = "black"),
+              axis.text.x.bottom = element_text(size = 12, colour = "black"),
+              axis.title.x = element_text(size = 12, colour = "black"))
+    return(SimuData_summary)
+}
+SimuData_summary <- SimuCorr(Model= Model, df=Data, Outcome="Oxidation Life", VariablesSelected=Data[3:ncol(Data)] %>% colnames())
+SimuData_summary <- SimuData_summary[order(match(SimuData_summary[,1],NonZeroCnt$Component)),]
+
+    plot1 <- ggplot(SimuData_summary, aes(y = c(1:length(SimuData_summary$Feature)), x = Cor)) +
+        geom_point(shape = 18, size = 5) +  
+        geom_errorbarh(aes(xmin = LB, xmax = UB), height = 0.25) +
+        geom_vline(xintercept = 0, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+        scale_y_continuous(name = "", breaks=1:length(SimuData_summary$Feature), labels = SimuData_summary$Feature, trans = "reverse") +
+        xlab("Correlation Coefficient (95% CI)") + 
+        ylab(" ") + 
+        theme_bw() +
+        theme(panel.border = element_blank(),
+              panel.background = element_blank(),
+              panel.grid.major = element_blank(), 
+              panel.grid.minor = element_blank(), 
+              axis.line = element_line(colour = "black"),
+              axis.text.y = element_text(size = 12, colour = "black"),
+              axis.text.x.bottom = element_text(size = 12, colour = "black"),
+              axis.title.x = element_text(size = 12, colour = "black"))
+    plot1
+
+```
+
+
+
+
+
+
+
